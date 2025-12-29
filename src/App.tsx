@@ -8,6 +8,7 @@ import { Dashboard } from '@/pages/Dashboard';
 import { BillsPage } from '@/pages/Bills';
 import { SettlementsPage } from '@/pages/Settlements';
 import { MembersPage } from '@/pages/Members';
+import { DataMigration } from '@/components/DataMigration';
 import { Toaster } from '@/components/ui/sonner';
 import { toast } from 'sonner';
 
@@ -398,6 +399,18 @@ function AppContent() {
               onUpdate={handleUpdateMember}
               onDelete={handleDeleteMember}
             />
+          }
+        />
+        <Route
+          path="/migrate"
+          element={
+            isAdmin ? (
+              <DataMigration />
+            ) : (
+              <div className="p-8 text-center text-muted-foreground">
+                Admin access required
+              </div>
+            )
           }
         />
       </Routes>
