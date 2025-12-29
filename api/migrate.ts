@@ -1,6 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { sql } from '@vercel/postgres';
-import { initializeDatabase } from './schema';
 
 // Migration endpoint to import data from Firebase export
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -17,9 +16,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    // Initialize tables first
-    await initializeDatabase();
-
     const { members, bills, settlements } = req.body;
     let membersImported = 0;
     let billsImported = 0;
@@ -53,18 +49,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     }
 
-    // Import bills
+    // Import bills (generate new UUIDs since Firebase IDs aren't UUIDs)
     if (bills && Array.isArray(bills)) {
       for (const bill of bills) {
         await sql`
           INSERT INTO bills (
-            id, name, amount, due_date, category, split_type, paid_by,
+            name, amount, due_date, category, split_type, paid_by,
             paid_contributions, contribution_dates, credit_used, credit_earned,
             coverage_allocations, paid_date, is_paid, status, recurring, frequency,
             custom_splits, items, notes, created_at, updated_at
           )
           VALUES (
-            ${bill.id}::uuid,
             ${bill.name},
             ${bill.amount},
             ${bill.dueDate},
@@ -87,24 +82,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             ${bill.createdAt || new Date().toISOString()},
             ${bill.updatedAt || new Date().toISOString()}
           )
-          ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            amount = EXCLUDED.amount,
-            due_date = EXCLUDED.due_date,
-            is_paid = EXCLUDED.is_paid,
-            updated_at = NOW()
         `;
         billsImported++;
       }
     }
 
-    // Import settlement records
+    // Import settlement records (generate new UUIDs)
     if (settlements && Array.isArray(settlements)) {
       for (const record of settlements) {
         await sql`
-          INSERT INTO settlement_records (id, from_id, to_id, amount, type, note, created_at)
+          INSERT INTO settlement_records (from_id, to_id, amount, type, note, created_at)
           VALUES (
-            ${record.id}::uuid,
             ${record.fromId},
             ${record.toId},
             ${record.amount},
@@ -112,7 +100,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             ${record.note || null},
             ${record.createdAt || new Date().toISOString()}
           )
-          ON CONFLICT (id) DO NOTHING
         `;
         settlementsImported++;
       }
