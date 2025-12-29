@@ -1,20 +1,6 @@
-import { useState, useEffect } from 'react';
-import {
-  collection,
-  doc,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  deleteField,
-  onSnapshot,
-  query,
-  orderBy,
-  setDoc,
-  writeBatch,
-} from 'firebase/firestore';
-import { db } from './firebase';
-import type { Bill, Person, CoverageAllocation } from './types';
-import { HOUSEHOLD_MEMBERS } from './types';
+import { useState, useEffect, useCallback } from 'react';
+import { membersApi, billsApi, settlementsApi } from './api';
+import type { Bill, Person, CoverageAllocation, SettlementRecord } from './types';
 
 // Re-export from extracted modules for backward compatibility
 export { calculateBillShares, getBillContributions } from './bill-utils';
@@ -24,93 +10,46 @@ export {
   calculateSettlementsWithBreakdown,
 } from './settlements';
 
-const BILLS_COLLECTION = 'bills';
-const MEMBERS_COLLECTION = 'members';
-
 export function useBills() {
   const [bills, setBills] = useState<Bill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const q = query(
-      collection(db, BILLS_COLLECTION),
-      orderBy('dueDate', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const billsData: Bill[] = [];
-        snapshot.forEach((doc) => {
-          const data = doc.data();
-          billsData.push({
-            id: doc.id,
-            name: data.name,
-            amount: data.amount,
-            dueDate: data.dueDate,
-            category: data.category,
-            splitType: data.splitType,
-            paidBy: data.paidBy,
-            paidContributions: data.paidContributions,
-            contributionDates: data.contributionDates,
-            creditUsed: data.creditUsed,
-            creditEarned: data.creditEarned,
-            coverageAllocations: data.coverageAllocations,
-            paidDate: data.paidDate,
-            isPaid: data.isPaid,
-            status: data.status || 'pending',
-            recurring: data.recurring || false,
-            frequency: data.frequency || 'once',
-            customSplits: data.customSplits,
-            items: data.items,
-            notes: data.notes,
-            createdAt: data.createdAt,
-            updatedAt: data.updatedAt,
-          });
-        });
-        setBills(billsData);
-        setLoading(false);
-      },
-      (err) => {
-        console.error('Error fetching bills:', err);
-        setError(err.message);
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
+  const fetchBills = useCallback(async () => {
+    try {
+      const data = await billsApi.getAll();
+      setBills(data);
+      setError(null);
+    } catch (err) {
+      console.error('Error fetching bills:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch bills');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
+  useEffect(() => {
+    fetchBills();
+    // Poll for updates every 30 seconds
+    const interval = setInterval(fetchBills, 30000);
+    return () => clearInterval(interval);
+  }, [fetchBills]);
+
   const addBill = async (bill: Omit<Bill, 'id' | 'createdAt' | 'updatedAt'>) => {
-    const now = new Date().toISOString();
-    // Filter out undefined values - Firestore doesn't accept undefined
-    const cleanBill = Object.fromEntries(
-      Object.entries(bill).filter(([, value]) => value !== undefined)
-    );
-    await addDoc(collection(db, BILLS_COLLECTION), {
-      ...cleanBill,
-      createdAt: now,
-      updatedAt: now,
-    });
+    await billsApi.create(bill);
+    await fetchBills();
   };
 
   const updateBill = async (id: string, updates: Partial<Bill>) => {
-    const billRef = doc(db, BILLS_COLLECTION, id);
-    // Convert undefined values to deleteField() to remove them from Firestore
-    const cleanUpdates: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(updates)) {
-      cleanUpdates[key] = value === undefined ? deleteField() : value;
-    }
-    await updateDoc(billRef, {
-      ...cleanUpdates,
-      updatedAt: new Date().toISOString(),
+    await billsApi.update(id, {
+      ...updates,
     });
+    await fetchBills();
   };
 
   const deleteBill = async (id: string) => {
-    const billRef = doc(db, BILLS_COLLECTION, id);
-    await deleteDoc(billRef);
+    await billsApi.delete(id);
+    await fetchBills();
   };
 
   const markAsPaid = async (
@@ -121,15 +60,15 @@ export function useBills() {
     coverageAllocations?: CoverageAllocation[],
     creditUsed?: Record<string, number>,
     creditEarned?: Record<string, number>,
-    paidDate?: string, // ISO date string, defaults to today if not provided
-    contributionDates?: Record<string, string> // ISO date strings for when each person contributed
+    paidDate?: string,
+    contributionDates?: Record<string, string>
   ) => {
     // Calculate total paid
     let totalPaid = 0;
     if (contributions) {
       totalPaid = Object.values(contributions).reduce((sum, amt) => sum + amt, 0);
     } else if (paidBy && billAmount) {
-      totalPaid = billAmount; // Single payer pays full amount
+      totalPaid = billAmount;
     }
 
     // Determine if this is a full payment
@@ -143,7 +82,7 @@ export function useBills() {
       creditUsed,
       creditEarned,
       coverageAllocations,
-      paidDate: paidDate || new Date().toISOString(),
+      paidDate: paidDate || new Date().toISOString().split('T')[0],
     });
   };
 
@@ -161,16 +100,9 @@ export function useBills() {
   };
 
   const deleteOldBills = async (cutoffDate: string) => {
-    const oldBills = bills.filter((bill) => bill.dueDate < cutoffDate);
-    if (oldBills.length === 0) return 0;
-
-    // Use batch for atomic deletion
-    const batch = writeBatch(db);
-    oldBills.forEach((bill) => {
-      batch.delete(doc(db, BILLS_COLLECTION, bill.id));
-    });
-    await batch.commit();
-    return oldBills.length;
+    const result = await billsApi.bulkDelete(cutoffDate);
+    await fetchBills();
+    return result.deleted;
   };
 
   return {
@@ -183,6 +115,7 @@ export function useBills() {
     deleteOldBills,
     markAsPaid,
     markAsUnpaid,
+    refetch: fetchBills,
   };
 }
 
@@ -190,82 +123,40 @@ export function useMembers() {
   const [members, setMembers] = useState<Person[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [initialized, setInitialized] = useState(false);
+
+  const fetchMembers = useCallback(async () => {
+    try {
+      const data = await membersApi.getAll();
+      setMembers(data);
+      setError(null);
+    } catch (err) {
+      console.error('Error fetching members:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch members');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    const q = query(
-      collection(db, MEMBERS_COLLECTION),
-      orderBy('name', 'asc')
-    );
-
-    const unsubscribe = onSnapshot(
-      q,
-      async (snapshot) => {
-        if (snapshot.empty && !initialized) {
-          // Initialize with default members on first load
-          try {
-            for (const member of HOUSEHOLD_MEMBERS) {
-              await setDoc(doc(db, MEMBERS_COLLECTION, member.id), {
-                name: member.name,
-                mortgageShare: member.mortgageShare,
-              });
-            }
-            setInitialized(true);
-          } catch (err) {
-            console.error('Error initializing members:', err);
-          }
-          return;
-        }
-
-        const membersData: Person[] = [];
-        snapshot.forEach((doc) => {
-          const data = doc.data();
-          membersData.push({
-            id: doc.id,
-            name: data.name,
-            mortgageShare: data.mortgageShare || 0,
-            email: data.email,
-            avatarColor: data.avatarColor,
-            defaultSplitPercentage: data.defaultSplitPercentage,
-            credit: data.credit || 0,
-            venmoHandle: data.venmoHandle,
-          });
-        });
-        setMembers(membersData);
-        setLoading(false);
-        setInitialized(true);
-      },
-      (err) => {
-        console.error('Error fetching members:', err);
-        setError(err.message);
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [initialized]);
+    fetchMembers();
+    // Poll for updates every 30 seconds
+    const interval = setInterval(fetchMembers, 30000);
+    return () => clearInterval(interval);
+  }, [fetchMembers]);
 
   const addMember = async (member: Omit<Person, 'id'>) => {
-    const id = member.name.toLowerCase().replace(/\s+/g, '-');
-    // Filter out undefined values - Firestore doesn't accept undefined
-    const cleanMember = Object.fromEntries(
-      Object.entries(member).filter(([, value]) => value !== undefined)
-    );
-    await setDoc(doc(db, MEMBERS_COLLECTION, id), cleanMember);
+    await membersApi.create(member);
+    await fetchMembers();
   };
 
   const updateMember = async (id: string, updates: Partial<Person>) => {
-    const memberRef = doc(db, MEMBERS_COLLECTION, id);
-    // Filter out undefined values - Firestore doesn't accept undefined
-    const cleanUpdates = Object.fromEntries(
-      Object.entries(updates).filter(([, value]) => value !== undefined)
-    );
-    await updateDoc(memberRef, cleanUpdates);
+    await membersApi.update(id, updates);
+    await fetchMembers();
   };
 
   const deleteMember = async (id: string) => {
-    const memberRef = doc(db, MEMBERS_COLLECTION, id);
-    await deleteDoc(memberRef);
+    await membersApi.delete(id);
+    await fetchMembers();
   };
 
   // Add credit to a member (from overpayment)
@@ -298,71 +189,48 @@ export function useMembers() {
     addCredit,
     useCredit,
     setCredit,
+    refetch: fetchMembers,
   };
 }
 
-const SETTLEMENTS_COLLECTION = 'settlementRecords';
-
 export function useSettlementRecords() {
-  const [records, setRecords] = useState<import('./types').SettlementRecord[]>([]);
+  const [records, setRecords] = useState<SettlementRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const q = query(
-      collection(db, SETTLEMENTS_COLLECTION),
-      orderBy('createdAt', 'desc')
-    );
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const recordsData: import('./types').SettlementRecord[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          recordsData.push({
-            id: docSnap.id,
-            fromId: data.fromId,
-            toId: data.toId,
-            amount: data.amount,
-            type: data.type,
-            note: data.note,
-            createdAt: data.createdAt,
-          });
-        });
-        setRecords(recordsData);
-        setLoading(false);
-      },
-      (err) => {
-        console.error('Error fetching settlement records:', err);
-        setError(err.message);
-        setLoading(false);
-      }
-    );
-
-    return () => unsubscribe();
+  const fetchRecords = useCallback(async () => {
+    try {
+      const data = await settlementsApi.getAll();
+      setRecords(data);
+      setError(null);
+    } catch (err) {
+      console.error('Error fetching settlement records:', err);
+      setError(err instanceof Error ? err.message : 'Failed to fetch records');
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const addSettlementRecord = async (record: Omit<import('./types').SettlementRecord, 'id' | 'createdAt'>) => {
-    await addDoc(collection(db, SETTLEMENTS_COLLECTION), {
-      ...record,
-      createdAt: new Date().toISOString(),
-    });
+  useEffect(() => {
+    fetchRecords();
+    // Poll for updates every 30 seconds
+    const interval = setInterval(fetchRecords, 30000);
+    return () => clearInterval(interval);
+  }, [fetchRecords]);
+
+  const addSettlementRecord = async (record: Omit<SettlementRecord, 'id' | 'createdAt'>) => {
+    await settlementsApi.create(record);
+    await fetchRecords();
   };
 
   const deleteSettlementRecord = async (id: string) => {
-    await deleteDoc(doc(db, SETTLEMENTS_COLLECTION, id));
+    await settlementsApi.delete(id);
+    await fetchRecords();
   };
 
   const clearAllSettlementRecords = async () => {
-    if (records.length === 0) return;
-
-    // Use batch for atomic deletion
-    const batch = writeBatch(db);
-    records.forEach((record) => {
-      batch.delete(doc(db, SETTLEMENTS_COLLECTION, record.id));
-    });
-    await batch.commit();
+    await settlementsApi.clearAll();
+    await fetchRecords();
   };
 
   // Get total forgiven amount between two people
@@ -380,5 +248,6 @@ export function useSettlementRecords() {
     deleteSettlementRecord,
     clearAllSettlementRecords,
     getForgivenAmount,
+    refetch: fetchRecords,
   };
 }
