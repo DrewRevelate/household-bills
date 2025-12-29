@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { sql } from '@vercel/postgres';
-import { initializeDatabase } from './db/schema';
+import { initializeDatabase } from './schema';
 
 // Migration endpoint to import data from Firebase export
 export default async function handler(req: VercelRequest, res: VercelResponse) {
